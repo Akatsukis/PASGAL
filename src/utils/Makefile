@@ -54,5 +54,11 @@ generate_grid_graph:	generate_grid_graph.cpp
 get_diameter:	get_diameter.cpp
 	$(CC) $(CPPFLAGS) $(INCLUDE_PATH) get_diameter.cpp -o get_diameter
 
+get_degree_histogram:	get_degree_histogram.cpp
+	$(CC) $(CPPFLAGS) $(INCLUDE_PATH) get_degree_histogram.cpp -o get_degree_histogram
+
+generate_weights:	generate_weights.cpp
+	$(CC) $(CPPFLAGS) $(INCLUDE_PATH) generate_weights.cpp -o generate_weights
+
 clean:
 	rm symmetrize pbbs2bin validator generate_random_graph generate_grid_graph get_diameter
