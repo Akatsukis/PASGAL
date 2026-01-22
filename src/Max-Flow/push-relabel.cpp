@@ -1,5 +1,6 @@
 #include "push-relabel.h"
 #include "PRSyncNondetWin_optimized.h"
+#include "PRSync2.h"
 
 #include <quill/Quill.h>
 
@@ -166,7 +167,7 @@ int main(int argc, char *argv[]) {
          << "Options:\n"
          << "\t-i,\tinput file path\n"
          << "\t-s,\tsymmetrized input graph\n"
-         << "\t-a,\talgorithm (default: basic, options: basic, nondet)\n";
+         << "\t-a,\talgorithm (default: nondet, options: basic, nondet, pr-matei, parallel)\n";
     return 0;
   }
   char c;
@@ -236,8 +237,15 @@ int main(int argc, char *argv[]) {
     } else {
       run(solver, G, source, target);
     }
+  } else if (algorithm == "pbbs") {
+    auto solver = PRSync2<GraphType>(G);
+    if (source == UINT_MAX || target == UINT_MAX) {
+      run(solver, G);
+    } else {
+      run(solver, G, source, target);
+    }
   } else {
-    std::cerr << "Error: Unknown algorithm '" << algorithm << "'. Available: basic, nondet" << std::endl;
+    std::cerr << "Error: Unknown algorithm '" << algorithm << "'. Available: basic, nondet, pr-matei, parallel" << std::endl;
     return 1;
   }
   return 0;
