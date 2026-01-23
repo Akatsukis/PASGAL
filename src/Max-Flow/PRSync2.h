@@ -29,7 +29,13 @@ class PRSync2 {
 	
 	sequence<FlowTy> enew;
 	sequence<int> hnew;
-	
+
+	static constexpr size_t ALPHA = 6;
+  	static constexpr size_t BETA = 12;
+	const float GLOBAL_UPDATE_FREQ = 3.0;
+
+	size_t work_threshold;
+	size_t work_counter = 0;
 
 	public:
 	PRSync2() = delete;
@@ -42,6 +48,8 @@ class PRSync2 {
 		
 		enew = sequence<FlowTy>::uninitialized(G.n);
 		hnew = sequence<int>::uninitialized(G.n);
+
+		work_threshold = ALPHA * n + G.m / 2;
 	}
 
 	void add_to_bag(NodeId u) {
@@ -49,6 +57,66 @@ class PRSync2 {
 			compare_and_swap(&in_frontier[u], false, true)) {
 			bag.insert(u);
 		}
+	}
+
+	inline bool need_global_relabel()
+	{
+		return work_counter * GLOBAL_UPDATE_FREQ > work_threshold;
+	}
+
+	void global_relabel()
+	{
+		cout<<"global relabel\n";
+		
+		parallel_for(0, G.n, [&](size_t i) {
+      		if (i != sink)
+        		heights[i] = n;
+    	});
+
+		// Sequential BFS for correctness
+		sequence<NodeId> current_level(G.n);
+		sequence<NodeId> next_level(G.n);
+		
+		heights[sink] = 0;
+		current_level[0] = sink;
+		size_t current_size = 1;
+		
+		int distance = 0;
+		while (current_size > 0) 
+		{
+			size_t next_size = 0;
+			
+			// Process current level
+			for (size_t i = 0; i < current_size; i++) 
+			{
+				NodeId u = current_level[i];
+				
+				// Look at incoming edges (reverse edges in residual graph)
+				for (size_t j = G.offsets[u]; j < G.offsets[u + 1]; j++) 
+				{
+					auto& e = G.edges[j];
+					NodeId v = e.v;
+					
+					// Check if reverse edge has capacity and v is not yet labeled
+					auto& rev_e = G.edges[e.rev];
+
+					if (rev_e.w > 0 && heights[v] == n && v != source) {
+						heights[v] = distance + 1;
+						next_level[next_size++] = v;
+					}
+				}
+			}
+			
+			// Swap levels
+			for (size_t i = 0; i < next_size; i++) {
+				current_level[i] = next_level[i];
+			}
+			current_size = next_size;
+			distance++;
+		}
+		
+		// Reset work counter
+		work_counter = 0;
 	}
 
 	void init() {
@@ -73,6 +141,8 @@ class PRSync2 {
 
 	void push_flow(NodeId u)
 	{
+		size_t local_work_done = 0;
+
 		for (size_t i = G.offsets[u]; i < G.offsets[u + 1]; i++) 
 		{
 			if(excess[u] == 0)
@@ -91,8 +161,12 @@ class PRSync2 {
 				G.edges[e.rev].w += value;
 
 				if(value) add_to_bag(e.v);
+
+				local_work_done += BETA;
 			}
 		}
+
+		write_add(&work_counter, local_work_done); //push work
 	}
 
 	int compute_new_label(NodeId u)
@@ -131,6 +205,10 @@ class PRSync2 {
 				printf("Iteration %d: frontier size: %zu\n", round, frontier_size);
 				cout<<enew[sink]<<'\n';
 			}
+
+
+			if(need_global_relabel())
+				global_relabel();
 				
 
 			//step 4 - updating excess values 
@@ -147,10 +225,14 @@ class PRSync2 {
 
 			//step 2 - compute new labels
 			parallel_for(0, frontier_size, [&](size_t i) {
-				if(excess[frontier[i]] > 0)
+				NodeId u = frontier[i];
+
+				write_add(&work_counter, BETA + (G.offsets[u + 1] - G.offsets[u])); //edge scan work
+				if(excess[u] > 0)
 				{
-					hnew[frontier[i]] = compute_new_label(frontier[i]);
-					add_to_bag(frontier[i]);
+					hnew[u] = compute_new_label(u);
+					write_add(&work_counter, BETA + (G.offsets[u + 1] - G.offsets[u])); //relabel work
+					add_to_bag(u);
 				}
 			});
 
