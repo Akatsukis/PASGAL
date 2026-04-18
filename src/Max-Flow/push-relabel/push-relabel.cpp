@@ -1,18 +1,34 @@
-#include "push-relabel.h"
+// Driver for the push-relabel max-flow algorithms in this directory:
+//   -a serial   : serial Goldberg-Tarjan FIFO push-relabel  (mf::SerialPushRelabel)
+//   -a prsn     : parallel sync nondeterministic w/ "win" rule, ESA'15 (mf::PRSyncNondet)
+//
+// Edge layout matches the residual graph emitted by ../reverse_edges.h:
+// every Edge carries a single residual-capacity field `.w` plus a `.rev`
+// index pointing to its mirror arc.  Flow on a forward arc i is implicitly
+// arcs[i.rev].w (the mirror's residual = the flow already routed forward).
 
-#include <quill/Quill.h>
+#include "../../graph.h"
+#include "../reverse_edges.h"
+#include "prs.h"
+#include "prsn.h"
+#include "serial_pr.h"
 
-#include <queue>
+#include <getopt.h>
+
+#include <fstream>
+#include <iomanip>
+#include <iostream>
 #include <string>
 #include <type_traits>
 
-#include "PRSyncNondetWin_optimized.h"
-#include "graph.h"
-#include "../reverse_edges.h"
+#include "parlay/internal/get_time.h"
+#include "parlay/parallel.h"
+#include "parlay/utilities.h"
 
-using namespace std;
-using namespace parlay;
-using namespace Basic;
+using std::cout;
+using std::endl;
+using std::ofstream;
+using std::string;
 
 typedef uint32_t NodeId;
 typedef uint32_t EdgeId;
@@ -31,74 +47,71 @@ template <class _FlowTy = int32_t>
 class FlowEdge : public BaseEdge<NodeId> {
  public:
   using FlowTy = _FlowTy;
-  union {
-    FlowTy w;
-    FlowTy cap;
-  };
-  FlowTy flow;
-  EdgeId rev;
+  FlowTy w;            // residual capacity in this arc's direction
+  EdgeId rev;          // index of the mirror arc
   FlowEdge() = default;
-  FlowEdge(NodeId _v, FlowTy _flow, FlowTy _cap)
-      : BaseEdge<NodeId>(_v), flow(_flow), cap(_cap) {}
+  FlowEdge(NodeId _v, FlowTy _w) : BaseEdge<NodeId>(_v), w(_w) {}
   bool operator<(const FlowEdge &rhs) const {
-    return this->v < rhs.v || (this->v == rhs.v && flow < rhs.flow);
+    return this->v < rhs.v || (this->v == rhs.v && w < rhs.w);
   }
   bool operator==(const FlowEdge &rhs) const {
-    return this->v == rhs.v && flow == rhs.flow;
+    return this->v == rhs.v && w == rhs.w;
   }
 };
 
-static_assert(alignof(FlowEdge<FlowTy>) == 4, "FlowEdge alignment is wrong");
-static_assert(sizeof(FlowEdge<FlowTy>) == 16, "FlowEdge size is wrong");
+static_assert(sizeof(FlowEdge<FlowTy>) == 12 || sizeof(FlowEdge<FlowTy>) == 16,
+              "FlowEdge has unexpected size");
 
 template <class Algo, class Graph, class NodeId = typename Graph::NodeId>
-void run(Algo &algo, [[maybe_unused]] Graph &G, NodeId s, NodeId t) {
+void run(Algo &algo, [[maybe_unused]] Graph &G, NodeId s, NodeId t,
+         const string &algo_label) {
   cout << "source " << s << ", target " << t << endl;
   double total_time = 0;
   FlowTy max_flow = 0;
   for (int i = 0; i <= NUM_ROUND; i++) {
-    parlay::parallel_for(0, G.m, [&](EdgeId j) { G.edges[j].flow = 0; });
-    internal::timer tm;
+    parlay::internal::timer tm;
     max_flow = algo.max_flow(s, t);
     tm.stop();
+    cout << std::fixed << std::setprecision(6);
     if (i == 0) {
-      cout << std::fixed << std::setprecision(6)
-           << "Warmup Round: " << tm.total_time() << endl;
+      cout << "Warmup Round: " << tm.total_time() << endl;
     } else {
-      cout << std::fixed << std::setprecision(6) << "Round " << i << ": "
-           << tm.total_time() << endl;
+      cout << "Round " << i << ": " << tm.total_time() << endl;
       total_time += tm.total_time();
     }
     cout << "Max flow: " << max_flow << endl;
   }
   double average_time = total_time / NUM_ROUND;
-  cout << std::fixed << std::setprecision(6) << "Average time: " << average_time
-       << endl;
+  cout << std::fixed << std::setprecision(6)
+       << "Average time: " << average_time << endl;
 
-  ofstream ofs("push-relabel.tsv", ios_base::app);
+  ofstream ofs(algo_label + ".tsv", std::ios_base::app);
   ofs << s << '\t' << t << '\t' << max_flow << '\t' << average_time << '\n';
-  ofs.close();
 }
 
 template <class Algo, class Graph>
-void run(Algo &algo, Graph &G) {
+void run(Algo &algo, Graph &G, const string &algo_label) {
   using NodeId = typename Graph::NodeId;
   for (int v = 0; v < NUM_SRC; v++) {
-    NodeId s = hash32(v) % G.n;
-    NodeId t = hash32(v + 1) % G.n;
-    run(algo, G, s, t);
+    NodeId s = parlay::hash32(v) % G.n;
+    NodeId t = parlay::hash32(v + 1) % G.n;
+    run(algo, G, s, t, algo_label);
   }
 }
 
 int main(int argc, char *argv[]) {
-  quill::start();
-
   if (argc == 1) {
-    cout << "Usage: " << argv[0] << " [-i input_file] [-s] [-a algorithm]\n"
+    cout << "Usage: " << argv[0]
+         << " [-i input_file] [-s] [-r src] [-t sink] [-a algorithm]\n"
          << "Options:\n"
          << "\t-i,\tinput file path\n"
          << "\t-s,\tsymmetrized input graph\n"
-         << "\t-a,\talgorithm (default: basic, options: basic, nondet)\n";
+         << "\t-r,\tsource node id (0-based)\n"
+         << "\t-t,\tsink   node id (0-based)\n"
+         << "\t-a,\talgorithm: serial | prs | prsn  (default: prsn)\n"
+         << "\t        \tserial = single-thread Goldberg-Tarjan FIFO PR\n"
+         << "\t        \tprs    = parallel sync deterministic baseline (ESA'15 §3)\n"
+         << "\t        \tprsn   = parallel sync nondeterministic + win rule (ESA'15 §3.1)\n";
     return 0;
   }
   char c;
@@ -106,24 +119,14 @@ int main(int argc, char *argv[]) {
   bool symmetrized = false;
   uint32_t source = UINT_MAX;
   uint32_t target = UINT_MAX;
-  string algorithm = "basic";
+  string algorithm = "prsn";
   while ((c = getopt(argc, argv, "i:sr:t:a:")) != -1) {
     switch (c) {
-      case 'i':
-        input_path = optarg;
-        break;
-      case 's':
-        symmetrized = true;
-        break;
-      case 'r':
-        source = atol(optarg);
-        break;
-      case 't':
-        target = atol(optarg);
-        break;
-      case 'a':
-        algorithm = optarg;
-        break;
+      case 'i': input_path = optarg; break;
+      case 's': symmetrized = true; break;
+      case 'r': source = atol(optarg); break;
+      case 't': target = atol(optarg); break;
+      case 'a': algorithm = optarg; break;
       default:
         std::cerr << "Error: Unknown option " << optopt << std::endl;
         abort();
@@ -138,39 +141,29 @@ int main(int argc, char *argv[]) {
     cout << "Generating edge weights..." << endl;
     G.generate_random_weight(1, WEIGHT_RANGE);
   }
-  // for (NodeId i = 0; i < G.n; i++) {
-  //   for (EdgeId j = G.offsets[i]; j < G.offsets[i + 1]; j++) {
-  //     printf("(%u,%u,%d)\n", i, G.edges[j].v, G.edges[j].w);
-  //   }
-  // }
-  // printf("\n");
-
   G = generate_reverse_edges(G);
 
   cout << "Running on " << input_path << ": |V|=" << G.n << ", |E|=" << G.m
        << ", num_src=" << NUM_SRC << ", num_round=" << NUM_ROUND << endl;
-
   cout << "Using algorithm: " << algorithm << endl;
 
   using GraphType = Graph<NodeId, EdgeId, FlowEdge<FlowTy>>;
 
-  if (algorithm == "nondet") {
-    auto solver = PRSyncNondetWin<GraphType>(G);
-    if (source == UINT_MAX || target == UINT_MAX) {
-      run(solver, G);
-    } else {
-      run(solver, G, source, target);
-    }
-  } else if (algorithm == "basic") {
-    auto solver = PushRelabel<GraphType>(G);
-    if (source == UINT_MAX || target == UINT_MAX) {
-      run(solver, G);
-    } else {
-      run(solver, G, source, target);
-    }
+  if (algorithm == "prsn") {
+    auto solver = mf::PRSyncNondet<GraphType>(G);
+    if (source == UINT_MAX || target == UINT_MAX) run(solver, G, "prsn");
+    else run(solver, G, source, target, "prsn");
+  } else if (algorithm == "prs") {
+    auto solver = mf::PRSync<GraphType>(G);
+    if (source == UINT_MAX || target == UINT_MAX) run(solver, G, "prs");
+    else run(solver, G, source, target, "prs");
+  } else if (algorithm == "serial") {
+    auto solver = mf::SerialPushRelabel<GraphType>(G);
+    if (source == UINT_MAX || target == UINT_MAX) run(solver, G, "serial");
+    else run(solver, G, source, target, "serial");
   } else {
     std::cerr << "Error: Unknown algorithm '" << algorithm
-              << "'. Available: basic, nondet" << std::endl;
+              << "'. Available: serial, prs, prsn" << std::endl;
     return 1;
   }
   return 0;

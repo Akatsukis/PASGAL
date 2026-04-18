@@ -33,9 +33,9 @@ fi
 
 # Algorithms to test:  (label, binary, extra-args)
 # push-relabel supports -a basic / -a nondet.
-declare -a ALGO_LABELS=("dinic" "push-relabel-basic" "push-relabel-nondet")
-declare -a ALGO_BINS=("$DINIC" "$PR" "$PR")
-declare -a ALGO_ARGS=("" "-a basic" "-a nondet")
+declare -a ALGO_LABELS=("dinic" "pr-serial" "pr-prs" "pr-prsn")
+declare -a ALGO_BINS=("$DINIC" "$PR" "$PR" "$PR")
+declare -a ALGO_ARGS=("" "-a serial" "-a prs" "-a prsn")
 
 pass=0
 fail=0
