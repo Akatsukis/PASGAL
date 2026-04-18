@@ -3,6 +3,7 @@
 typedef uint32_t NodeId;
 typedef uint64_t EdgeId;
 typedef uint32_t EdgeTy;
+using Edge = WeightedEdge<NodeId, EdgeTy>;
 
 int main(int argc, char* argv[]) {
   if (argc == 1) {
@@ -37,7 +38,7 @@ int main(int argc, char* argv[]) {
     }
   }
   printf("n: %zu, m: %zu\n", n, m);
-  Graph<NodeId, EdgeId, EdgeTy> G;
+  Graph<NodeId, EdgeId, Edge> G;
   G.generate_random_graph(n, m);
   G.generate_random_weight(1, 10);
   G = make_symmetrized(G);
