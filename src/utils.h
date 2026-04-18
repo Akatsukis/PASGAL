@@ -54,8 +54,8 @@ inline E fetch_and_add(E *a, EV b) {
 
 template <typename E, typename EV>
 inline void write_add(E *a, EV b) {
-  // volatile E newV, oldV;
-  E newV, oldV;
+  volatile E newV, oldV;
+  // E newV, oldV;
   do {
     oldV = *a;
     newV = oldV + b;

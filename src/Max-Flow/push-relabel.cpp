@@ -1,12 +1,12 @@
 #include "push-relabel.h"
-#include "PRSyncNondetWin_optimized.h"
 
 #include <quill/Quill.h>
 
 #include <queue>
-#include <type_traits>
 #include <string>
+#include <type_traits>
 
+#include "PRSyncNondetWin_optimized.h"
 #include "graph.h"
 
 using namespace std;
@@ -14,7 +14,7 @@ using namespace parlay;
 using namespace Basic;
 
 typedef uint32_t NodeId;
-typedef uint64_t EdgeId;
+typedef uint32_t EdgeId;
 #ifdef FLOAT
 typedef float FlowTy;
 #else
@@ -30,17 +30,25 @@ template <class _FlowTy = int32_t>
 class FlowEdge : public BaseEdge<NodeId> {
  public:
   using FlowTy = _FlowTy;
-  FlowTy w;  // capacity
+  union {
+    FlowTy w;
+    FlowTy cap;
+  };
+  FlowTy flow;
   EdgeId rev;
   FlowEdge() = default;
-  FlowEdge(NodeId _v, FlowTy _w) : BaseEdge<NodeId>(_v), w(_w) {}
+  FlowEdge(NodeId _v, FlowTy _flow, FlowTy _cap)
+      : BaseEdge<NodeId>(_v), flow(_flow), cap(_cap) {}
   bool operator<(const FlowEdge &rhs) const {
-    return this->v < rhs.v || (this->v == rhs.v && w < rhs.w);
+    return this->v < rhs.v || (this->v == rhs.v && flow < rhs.flow);
   }
   bool operator==(const FlowEdge &rhs) const {
-    return this->v == rhs.v && w == rhs.w;
+    return this->v == rhs.v && flow == rhs.flow;
   }
 };
+
+static_assert(alignof(FlowEdge<FlowTy>) == 4, "FlowEdge alignment is wrong");
+static_assert(sizeof(FlowEdge<FlowTy>) == 16, "FlowEdge size is wrong");
 
 template <class Graph>
 Graph generate_reverse_edges(const Graph &G) {
@@ -72,10 +80,10 @@ Graph generate_reverse_edges(const Graph &G) {
   parlay::parallel_for(0, G.m * 2, [&](EdgeId i) {
     EdgeId id = std::get<2>(edgelist[i]);
     G_rev.edges[i].v = std::get<1>(edgelist[i]);
-    G_rev.edges[i].w = (id & 1) ? 0 : G.edges[id / 2].w;
+    G_rev.edges[i].cap = (id & 1) ? 0 : G.edges[id / 2].cap;
     if (G.symmetrized) {
-    G_rev.edges[i].w = G.edges[id / 2].w;
-    } 
+      G_rev.edges[i].cap = G.edges[id / 2].cap;
+    }
     if (i == 0 || std::get<0>(edgelist[i]) != std::get<0>(edgelist[i - 1])) {
       G_rev.offsets[std::get<0>(edgelist[i])] = i;
     }
@@ -107,11 +115,11 @@ Graph generate_reverse_edges(const Graph &G) {
   // validate
   parlay::parallel_for(0, G_rev.n, [&](NodeId u) {
     parlay::parallel_for(G_rev.offsets[u], G_rev.offsets[u + 1], [&](EdgeId i) {
-      FlowTy w = G_rev.edges[i].w;
+      FlowTy cap = G_rev.edges[i].cap;
       EdgeId rev = G_rev.edges[i].rev;
       assert(G_rev.edges[rev].v == u);
-      if (w) {
-        assert(G_rev.edges[rev].w == 0);
+      if (cap) {
+        assert(G_rev.edges[rev].cap == 0);
       }
     });
   });
@@ -122,10 +130,8 @@ void run(Algo &algo, [[maybe_unused]] Graph &G, NodeId s, NodeId t) {
   cout << "source " << s << ", target " << t << endl;
   double total_time = 0;
   FlowTy max_flow = 0;
-  parlay::sequence<FlowTy> flows =
-      parlay::tabulate(G.m, [&](EdgeId i) { return G.edges[i].w; });
   for (int i = 0; i <= NUM_ROUND; i++) {
-    parlay::parallel_for(0, G.m, [&](EdgeId j) { G.edges[j].w = flows[j]; });
+    parlay::parallel_for(0, G.m, [&](EdgeId j) { G.edges[j].flow = 0; });
     internal::timer tm;
     max_flow = algo.max_flow(s, t);
     tm.stop();
@@ -174,7 +180,7 @@ int main(int argc, char *argv[]) {
   bool symmetrized = false;
   uint32_t source = UINT_MAX;
   uint32_t target = UINT_MAX;
-  string algorithm = "nondet";
+  string algorithm = "basic";
   while ((c = getopt(argc, argv, "i:sr:t:a:")) != -1) {
     switch (c) {
       case 'i':
@@ -219,9 +225,9 @@ int main(int argc, char *argv[]) {
        << ", num_src=" << NUM_SRC << ", num_round=" << NUM_ROUND << endl;
 
   cout << "Using algorithm: " << algorithm << endl;
-  
+
   using GraphType = Graph<NodeId, EdgeId, FlowEdge<FlowTy>>;
-  
+
   if (algorithm == "nondet") {
     auto solver = PRSyncNondetWin<GraphType>(G);
     if (source == UINT_MAX || target == UINT_MAX) {
@@ -237,7 +243,8 @@ int main(int argc, char *argv[]) {
       run(solver, G, source, target);
     }
   } else {
-    std::cerr << "Error: Unknown algorithm '" << algorithm << "'. Available: basic, nondet" << std::endl;
+    std::cerr << "Error: Unknown algorithm '" << algorithm
+              << "'. Available: basic, nondet" << std::endl;
     return 1;
   }
   return 0;
