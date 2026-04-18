@@ -8,6 +8,7 @@
 
 #include "PRSyncNondetWin_optimized.h"
 #include "graph.h"
+#include "../reverse_edges.h"
 
 using namespace std;
 using namespace parlay;
@@ -50,81 +51,6 @@ class FlowEdge : public BaseEdge<NodeId> {
 static_assert(alignof(FlowEdge<FlowTy>) == 4, "FlowEdge alignment is wrong");
 static_assert(sizeof(FlowEdge<FlowTy>) == 16, "FlowEdge size is wrong");
 
-template <class Graph>
-Graph generate_reverse_edges(const Graph &G) {
-  using Edge = typename Graph::Edge;
-  parlay::sequence<std::tuple<NodeId, NodeId, EdgeId>> edgelist(G.m * 2);
-  parlay::parallel_for(0, G.n, [&](NodeId u) {
-    parlay::parallel_for(G.offsets[u], G.offsets[u + 1], [&](EdgeId i) {
-      // forward edge
-      std::get<0>(edgelist[i * 2]) = u;
-      std::get<1>(edgelist[i * 2]) = G.edges[i].v;
-      std::get<2>(edgelist[i * 2]) = i * 2;
-      // reverse edge
-      std::get<0>(edgelist[i * 2 + 1]) = G.edges[i].v;
-      std::get<1>(edgelist[i * 2 + 1]) = u;
-      std::get<2>(edgelist[i * 2 + 1]) = i * 2 + 1;
-    });
-  });
-  parlay::sort_inplace(parlay::make_slice(edgelist), [&](auto &a, auto &b) {
-    return std::get<0>(a) < std::get<0>(b) ||
-           (std::get<0>(a) == std::get<0>(b) &&
-            std::get<1>(a) < std::get<1>(b));
-  });
-
-  Graph G_rev;
-  G_rev.n = G.n;
-  G_rev.m = G.m * 2;
-  G_rev.offsets = parlay::sequence<EdgeId>(G.n + 1, G.m * 2);
-  G_rev.edges = parlay::sequence<Edge>(G.m * 2);
-  parlay::parallel_for(0, G.m * 2, [&](EdgeId i) {
-    EdgeId id = std::get<2>(edgelist[i]);
-    G_rev.edges[i].v = std::get<1>(edgelist[i]);
-    G_rev.edges[i].cap = (id & 1) ? 0 : G.edges[id / 2].cap;
-    if (G.symmetrized) {
-      G_rev.edges[i].cap = G.edges[id / 2].cap;
-    }
-    if (i == 0 || std::get<0>(edgelist[i]) != std::get<0>(edgelist[i - 1])) {
-      G_rev.offsets[std::get<0>(edgelist[i])] = i;
-    }
-  });
-  parlay::scan_inclusive_inplace(
-      parlay::make_slice(G_rev.offsets.rbegin(), G_rev.offsets.rend()),
-      parlay::minm<EdgeId>());
-  parlay::sequence<tuple<uint32_t, uint32_t>> rev_id(G.m);
-  parlay::parallel_for(0, G_rev.n, [&](NodeId u) {
-    parlay::parallel_for(G_rev.offsets[u], G_rev.offsets[u + 1], [&](EdgeId i) {
-      EdgeId id = std::get<2>(edgelist[i]);
-      if (id & 1) {
-        std::get<1>(rev_id[id / 2]) = i;
-      } else {
-        std::get<0>(rev_id[id / 2]) = i;
-      }
-    });
-  });
-
-  parlay::parallel_for(0, G.m * 2, [&](EdgeId i) {
-    EdgeId id = std::get<2>(edgelist[i]);
-    if (id & 1) {
-      G_rev.edges[i].rev = std::get<0>(rev_id[id / 2]);
-    } else {
-      G_rev.edges[i].rev = std::get<1>(rev_id[id / 2]);
-    }
-  });
-
-  // validate
-  parlay::parallel_for(0, G_rev.n, [&](NodeId u) {
-    parlay::parallel_for(G_rev.offsets[u], G_rev.offsets[u + 1], [&](EdgeId i) {
-      FlowTy cap = G_rev.edges[i].cap;
-      EdgeId rev = G_rev.edges[i].rev;
-      assert(G_rev.edges[rev].v == u);
-      if (cap) {
-        assert(G_rev.edges[rev].cap == 0);
-      }
-    });
-  });
-  return G_rev;
-}
 template <class Algo, class Graph, class NodeId = typename Graph::NodeId>
 void run(Algo &algo, [[maybe_unused]] Graph &G, NodeId s, NodeId t) {
   cout << "source " << s << ", target " << t << endl;
